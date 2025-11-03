@@ -1363,3 +1363,81 @@ void swift::conformToCxxSpanIfNeeded(ClangImporter::Implementation &impl,
     impl.addSynthesizedProtocolAttrs(decl, {KnownProtocolKind::CxxMutableSpan});
   }
 }
+
+void swift::conformToHashableIfNeeded(ClangImporter::Implementation &impl,
+                                      SwiftDeclSynthesizer &synthesizer,
+                                      NominalTypeDecl *decl,
+                                      const clang::CXXRecordDecl *clangDecl) {
+  PrettyStackTraceDecl trace("conforming to Hashable", decl);
+
+  ASTContext &ctx = decl->getASTContext();
+  assert(decl);
+  assert(clangDecl);
+  clang::ASTContext &Ctx = impl.getClangASTContext();
+  clang::Sema &clangSema = impl.getClangSema();
+
+  clang::NamespaceDecl *stdNS = clangSema.getStdNamespace();
+
+  // maybe the C++ header didn't include standard library?
+  if (!stdNS)
+    return;
+
+  clang::DeclarationName hashName = Ctx.DeclarationNames.getIdentifier(
+                             &Ctx.Idents.get("hash")),
+                         equalToName = Ctx.DeclarationNames.getIdentifier(
+                             &Ctx.Idents.get("equal_to"));
+
+  clang::ClassTemplateDecl *
+      hashDecl = stdNS->lookup(hashName).find_first<clang::ClassTemplateDecl>(),
+     *equalToDecl =
+         stdNS->lookup(equalToName).find_first<clang::ClassTemplateDecl>();
+
+  if (!hashDecl || !equalToDecl)
+    return;
+
+  // find specializtion to the current clangDecl
+  void *insertPos = nullptr;
+  clang::ClassTemplateSpecializationDecl
+      *hashSpecDecl = hashDecl->findSpecialization(
+          {clang::TemplateArgument(
+              clangDecl->getASTContext().getTypeDeclType(clangDecl))},
+          insertPos),
+      *equalToSpecDecl = equalToDecl->findSpecialization(
+          {clang::TemplateArgument(
+              clangDecl->getASTContext().getTypeDeclType(clangDecl))},
+          insertPos);
+
+  if (!hashSpecDecl || !equalToSpecDecl)
+    return;
+  // visit the specialized hash declaration to import swift declarations
+  StructDecl *stdHash = dyn_cast<StructDecl>(
+                 impl.importDecl(hashSpecDecl, impl.CurrentVersion)),
+             *stdET = dyn_cast<StructDecl>(
+                 impl.importDecl(equalToSpecDecl, impl.CurrentVersion));
+
+  if (!stdHash || !stdET) {
+    llvm::dbgs() << "importation failure\n";
+    return;
+  }
+
+  FuncDecl *hashFunc = synthesizer.makeHashFunc(decl, stdHash),
+           *eqFunc = synthesizer.makeEqualFunc(decl, stdET);
+
+  decl->addMember(hashFunc);
+
+  // FIXME: for some reason, this [eqFunc] don't get recognized by Equtable
+  // protocol unless I add the @_implements(Equatable, ==(_:_:)) attribute
+  auto equatableProto = ctx.getProtocol(KnownProtocolKind::Equatable);
+  SmallVector<Identifier, 2> argumentLabels = {Identifier(), Identifier()};
+  auto equalsDeclName =
+      DeclName(ctx, DeclBaseName(ctx.Id_EqualsOperator), argumentLabels);
+
+  decl->addMember(eqFunc);
+  decl->addMemberToLookupTable(eqFunc);
+  // FIXME: for some reason, this [eqFunc] only works if I add attribute *after*
+  // adding member lookup table.
+  eqFunc->addAttribute(
+      ImplementsAttr::create(decl, equatableProto, equalsDeclName));
+
+  impl.addSynthesizedProtocolAttrs(decl, {KnownProtocolKind::Hashable});
+}
