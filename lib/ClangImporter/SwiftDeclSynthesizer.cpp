@@ -1990,6 +1990,208 @@ FuncDecl *SwiftDeclSynthesizer::makeSuccessorFunc(FuncDecl *incrementFunc) {
   return result;
 }
 
+// MARK: use std::hash<> to conform to Hashable
+
+/// delayed body synthesizer for hash(into:)
+///
+/// \code
+/// hasher.combine(std::hash<T>.init()(self))
+/// \endcode
+static std::pair<BraceStmt *, bool>
+synthesizeHashFuncBody(AbstractFunctionDecl *afd, void *context) {
+  auto hashFunc = cast<FuncDecl>(afd);
+  auto stdHash = static_cast<StructDecl *>(context);
+
+  ASTContext &ctx = hashFunc->getASTContext();
+
+  // lookup init() for std::hash<T>
+  auto stdHashType =
+      TypeExpr::createImplicit(stdHash->getDeclaredInterfaceType(), ctx);
+  DeclName initName = DeclName(DeclBaseName::createConstructor());
+
+  ConstructorDecl *init = nullptr;
+  for (auto found : stdHash->lookupDirect(initName)) {
+    init = dyn_cast<ConstructorDecl>(found);
+    if (init && init->getDeclContext() == stdHash &&
+        init->getParameters()->size() == 0)
+      break;
+  }
+  assert(init && "did not find init() for std::hash<T>");
+
+  // init: (std::hash<T>.Type) -> () -> std::hash<T>
+  auto initTy = init->getInterfaceType();
+  auto initRef = new (ctx) DeclRefExpr(init, DeclNameLoc(), /*Implicit=*/true,
+                                       AccessSemantics::Ordinary, initTy);
+
+  // std::hash<T>.init: () -> std::hash<T>
+  initTy = initTy->castTo<FunctionType>()->getResult();
+  auto stdHashInitRef = DotSyntaxCallExpr::create(
+      ctx, initRef, SourceLoc(), Argument::unlabeled(stdHashType), initTy);
+
+  // std::hash<T>.init(): std::hash<T>
+  initTy = initTy->castTo<FunctionType>()->getResult();
+  auto instRef = CallExpr::createImplicitEmpty(ctx, stdHashInitRef);
+  instRef->setType(initTy);
+
+  // self: Self
+  auto selfDecl = hashFunc->getImplicitSelfDecl();
+  auto selfRefExpr = new (ctx) DeclRefExpr(selfDecl, DeclNameLoc(),
+                                           /*implicit*/ true);
+  selfRefExpr->setType(selfDecl->getInterfaceType());
+
+  // std::hash<T>.init()(self): Int
+  auto *stdHashArgs = ArgumentList::forImplicitUnlabeled(ctx, {selfRefExpr});
+  auto stdHashExpr = CallExpr::createImplicit(ctx, instRef, stdHashArgs);
+  stdHashExpr->setType(ctx.getIntType());
+
+  // hasher: Hasher
+  auto hasherParam = hashFunc->getParameters()->get(0);
+  Expr *hasherRef = new (ctx) DeclRefExpr(ConcreteDeclRef(hasherParam),
+                                          DeclNameLoc(), /*implicit*/ true);
+  hasherRef->setType(hasherParam->getInterfaceType());
+
+  // hasher.combine(_:): (Int) -> ()
+  auto *combineRef =
+      UnresolvedDotExpr::createImplicit(ctx, hasherRef, ctx.Id_combine);
+
+  // hasher.combine(hashable)
+  auto *hasherArgs = ArgumentList::forImplicitUnlabeled(ctx, {stdHashExpr});
+  auto *hasherCall = CallExpr::createImplicit(ctx, combineRef, hasherArgs);
+  hasherCall->setType(TupleType::getEmpty(ctx));
+  auto body = BraceStmt::create(ctx, SourceLoc(), {hasherCall}, SourceLoc());
+
+  return {body, /*isTypeChecked*/ false};
+}
+
+FuncDecl *SwiftDeclSynthesizer::makeHashFunc(NominalTypeDecl *decl,
+                                             StructDecl *stdHash) {
+  auto &ctx = ImporterImpl.SwiftContext;
+
+  auto hasherDecl = ctx.getHasherDecl();
+  Type hasherType = hasherDecl->getDeclaredInterfaceType();
+
+  // Params: self (implicit), into: hasher
+  auto *hasherParamDecl = new (ctx) ParamDecl(
+      SourceLoc(), SourceLoc(), ctx.Id_into, SourceLoc(), ctx.Id_hasher, decl);
+  hasherParamDecl->setSpecifier(ParamSpecifier::InOut);
+  hasherParamDecl->setInterfaceType(hasherType);
+  hasherParamDecl->setImplicit();
+
+  ParameterList *params = ParameterList::createWithoutLoc(hasherParamDecl);
+
+  // Return type: ()
+  auto returnType = TupleType::getEmpty(ctx);
+
+  // func hash(into hasher: inout Hasher) -> ()
+  DeclName name(ctx, ctx.Id_hash, params);
+  auto *const hashFunc = FuncDecl::createImplicit(
+      ctx, StaticSpellingKind::None, name, /*NameLoc=*/SourceLoc(),
+      /*Async=*/false,
+      /*Throws=*/false, /*ThrownType=*/Type(),
+      /*GenericParams=*/nullptr, params, returnType, decl);
+  hashFunc->setSynthesized();
+  hashFunc->setAccess(AccessLevel::Public);
+  hashFunc->setBodySynthesizer(synthesizeHashFuncBody, stdHash);
+
+  return hashFunc;
+}
+
+// MARK: use std::equal_to<> to conform to Equatable
+
+/// delayed body synthesizer for ==(lhs:rhs:)
+///
+/// \code
+/// std::equal_to<T>.init()(lhs, rhs)
+/// \endcode
+static std::pair<BraceStmt *, bool>
+synthesizeEqualFuncBody(AbstractFunctionDecl *afd, void *context) {
+  auto eqFunc = cast<FuncDecl>(afd);
+  auto stdET = static_cast<StructDecl *>(context);
+
+  ASTContext &ctx = eqFunc->getASTContext();
+
+  // lookup init() for std::equal_to<T>
+  auto stdETType =
+      TypeExpr::createImplicit(stdET->getDeclaredInterfaceType(), ctx);
+  DeclName initName = DeclName(DeclBaseName::createConstructor());
+
+  ConstructorDecl *init = nullptr;
+  for (auto found : stdET->lookupDirect(initName)) {
+    init = dyn_cast<ConstructorDecl>(found);
+    if (init && init->getDeclContext() == stdET &&
+        init->getParameters()->size() == 0)
+      break;
+  }
+  assert(init && "did not find init() for std::equal_to<T>");
+
+  // init: (std::equal_to<T>.Type) -> () -> std::equal_to<T>
+  auto initTy = init->getInterfaceType();
+  auto initRef = new (ctx) DeclRefExpr(init, DeclNameLoc(), /*Implicit=*/true,
+                                       AccessSemantics::Ordinary, initTy);
+
+  // std::equal_to<T>.init: () -> std::equal_to<T>
+  initTy = initTy->castTo<FunctionType>()->getResult();
+  auto stdETInitRef = DotSyntaxCallExpr::create(
+      ctx, initRef, SourceLoc(), Argument::unlabeled(stdETType), initTy);
+
+  // std::equal_to<T>.init(): std::equal_to<T>
+  initTy = initTy->castTo<FunctionType>()->getResult();
+  auto instRef = CallExpr::createImplicitEmpty(ctx, stdETInitRef);
+  instRef->setType(initTy);
+
+  auto lhsParam = eqFunc->getParameters()->get(0);
+  Expr *lhsRef = new (ctx)
+      DeclRefExpr(ConcreteDeclRef(lhsParam), DeclNameLoc(), /*implicit*/ true);
+  auto rhsParam = eqFunc->getParameters()->get(1);
+  Expr *rhsRef = new (ctx)
+      DeclRefExpr(ConcreteDeclRef(rhsParam), DeclNameLoc(), /*implicit*/ true);
+
+  // std::equal_to<T>.init()(lhs, rhs)
+  auto *argList = ArgumentList::forImplicitUnlabeled(ctx, {lhsRef, rhsRef});
+  auto resultExpr = CallExpr::createImplicit(ctx, instRef, argList);
+
+  auto returnStmt = ReturnStmt::createImplicit(ctx, resultExpr);
+
+  auto body = BraceStmt::create(ctx, SourceLoc(), {returnStmt}, SourceLoc());
+  return {body, /*isTypeChecked*/ false};
+}
+
+FuncDecl *SwiftDeclSynthesizer::makeEqualFunc(NominalTypeDecl *decl,
+                                              StructDecl *stdET) {
+  auto &ctx = ImporterImpl.SwiftContext;
+
+  Type selfType = decl->getSelfInterfaceType();
+  // Params: self (implicit), lhs, rhs
+  auto getParamDecl = [&](StringRef s) -> ParamDecl * {
+    auto *param = new (ctx) ParamDecl(SourceLoc(), SourceLoc(), Identifier(),
+                                      SourceLoc(), ctx.getIdentifier(s), decl);
+    param->setSpecifier(ParamSpecifier::Default);
+    param->setInterfaceType(selfType);
+    param->setImplicit();
+    return param;
+  };
+
+  ParameterList *params =
+      ParameterList::create(ctx, {getParamDecl("lhs"), getParamDecl("rhs")});
+
+  // Return type: (Bool)
+  Type returnType = ctx.getBoolType();
+
+  // func ==(lhs: Self, rhs: Self) -> Bool
+  DeclName name(ctx, ctx.Id_EqualsOperator, params);
+  auto *const eqFunc = FuncDecl::createImplicit(
+      ctx, StaticSpellingKind::KeywordStatic, name, /*NameLoc=*/SourceLoc(),
+      /*Async=*/false,
+      /*Throws=*/false, /*ThrownType=*/Type(),
+      /*GenericParams=*/nullptr, params, returnType, decl);
+  eqFunc->setUserAccessible(false);
+  eqFunc->setSynthesized();
+  eqFunc->copyFormalAccessFrom(decl, /*sourceIsParentContext*/ true);
+  eqFunc->setBodySynthesizer(synthesizeEqualFuncBody, stdET);
+
+  return eqFunc;
+}
+
 // MARK: C++ arithmetic operators
 
 static std::pair<BraceStmt *, bool>
