@@ -1526,11 +1526,8 @@ void swift::conformToHashableIfNeeded(ClangImporter::Implementation &impl,
                                       const clang::CXXRecordDecl *clangDecl) {
   PrettyStackTraceDecl trace("conforming to Hashable", decl);
 
-  ASTContext &ctx = decl->getASTContext();
   assert(decl);
   assert(clangDecl);
-  clang::ASTContext &Ctx = impl.getClangASTContext();
-  clang::Sema &clangSema = impl.getClangSema();
 
   auto *stdHashSpec =
       lookupAndSpecializeFunctionObject(impl, clangDecl, "hash");
@@ -1555,12 +1552,11 @@ void swift::conformToHashableIfNeeded(ClangImporter::Implementation &impl,
   FuncDecl *hashFunc = synthesizer.makeHashFunc(decl, stdHash);
   decl->addMember(hashFunc);
 
-  if (stdETSpec) {
-    // Even though I don't need [stdET] imported now, I still need its
-    // constructor defined, which I couldn't find another way to achieve it
-    //
-    // FIXME: If both operator== and equal_to exist, which implementation should
-    // we prioritize?
+  // we have two possible sources for [==(_:_:)]
+  // 1. [std::equal_to<T>]
+  // 2. [bool operator==(T, T)]
+  // For backward compatibility and simplicity, 2 is prioritized over 1
+  if (!getEqualEqualOperator(decl)) {
     auto *stdET =
         dyn_cast<StructDecl>(impl.importDecl(stdETSpec, impl.CurrentVersion));
     if (!stdET)
