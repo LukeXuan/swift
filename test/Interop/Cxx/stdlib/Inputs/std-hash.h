@@ -41,3 +41,19 @@ struct std::equal_to<B> {
     return lhs.value == rhs.value;
   }
 };
+
+struct C {
+  int x, y;
+};
+
+struct D {
+  int x, y;
+};
+
+template <class T>
+struct hash;
+
+template <>
+struct hash<D> {
+  size_t operator()(const D &x) const { return std::hash<int>{}(x.y); }
+};

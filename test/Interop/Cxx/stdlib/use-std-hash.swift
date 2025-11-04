@@ -9,7 +9,6 @@
 import StdlibUnittest
 import StdHash
 import CxxStdlib
-import Cxx
 
 var StdHashTestSuite = TestSuite("StdHash")
 
